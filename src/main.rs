@@ -29,12 +29,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("{:?}", segments.first());
 
+    let path = args.next().unwrap();
+
+    let mut i = 0;
     while let Some(frame) = try_take_frame(&mut segments) {
-        frame
-            .get_pixels()
-            .unwrap()
-            .save_with_format(args.next().unwrap(), image::ImageFormat::Png);
-        break;
+        let frame_path = format!("{}/subpic{}.png", &path, i);
+
+        if let Some(f) = frame.get_pixels() {
+            f.save_with_format(frame_path, image::ImageFormat::Png);
+        }
+
+        i += 1;
     }
 
     println!("{:?}", segments.len());

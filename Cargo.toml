@@ -3,9 +3,13 @@ name = "pyrite"
 version = "0.1.0"
 edition = "2021"
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+[lib]
+crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 image = "0.23.14"
+lazy_static = "1.4.0"
 nom = "7.0.0"
 simple-matrix = "0.1.2"
+wasm-bindgen = "0.2.78"
+web-sys = { version = "0.3.55", features = ['CanvasRenderingContext2d', 'Document', 'ImageData', 'Element', 'HtmlCanvasElement', 'Window'] }

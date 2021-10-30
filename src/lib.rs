@@ -1,7 +1,15 @@
+pub mod utils;
+pub mod wasm_iface;
+
 use nom::bytes::streaming::*;
-use nom::IResult;
-use nom::number::streaming::*;
 use nom::combinator::*;
+use nom::number::streaming::*;
+use nom::IResult;
+
+use simple_matrix::Matrix;
+
+use image::Rgba;
+use image::RgbaImage;
 
 #[derive(Debug)]
 pub enum SegmentType {
@@ -9,7 +17,7 @@ pub enum SegmentType {
     ODS = 0x15,
     PCS = 0x16,
     WDS = 0x17,
-    END = 0x80
+    END = 0x80,
 }
 
 #[derive(Debug)]
@@ -23,7 +31,7 @@ pub struct Header {
 pub fn parse_header(data: &[u8]) -> IResult<&[u8], Header> {
     // magic number (0x5047) PG
     let (data, _) = tag("PG")(data)?;
-    
+
     let (data, pts) = be_u32(data)?;
     let (data, dts) = be_u32(data)?;
     let (data, segment_type) = be_u8(data)?;
@@ -33,13 +41,19 @@ pub fn parse_header(data: &[u8]) -> IResult<&[u8], Header> {
         0x16 => SegmentType::PCS,
         0x17 => SegmentType::WDS,
         0x80 => SegmentType::END,
-        _ => todo!()
+        _ => todo!(),
     };
     let (data, segment_size) = be_u16(data)?;
 
-    Ok((data, Header {
-        pts, dts, segment_type, segment_size
-    }))
+    Ok((
+        data,
+        Header {
+            pts,
+            dts,
+            segment_type,
+            segment_size,
+        },
+    ))
 }
 
 #[derive(Debug)]
@@ -70,32 +84,28 @@ pub fn parse_pcs(data: &[u8], header: Header) -> IResult<&[u8], PCSegment> {
 
     let mut objects = vec![];
 
-    let mut i = 0u8;
-    loop {
-        if i == num_objects {
-            break;
-        }
-
+    for _ in 0..num_objects {
         let (leftover, object) = parse_compobj(data)?;
         objects.push(object);
 
         data = leftover;
+    }
 
-        i += 1;
-    };
-
-    Ok((data, PCSegment {
-        header,
-        width,
-        height,
-        fps,
-        composition_n,
-        composition_s,
-        pallete_update,
-        pallete_id,
-        num_objects,
-        objects
-    }))
+    Ok((
+        data,
+        PCSegment {
+            header,
+            width,
+            height,
+            fps,
+            composition_n,
+            composition_s,
+            pallete_update,
+            pallete_id,
+            num_objects,
+            objects,
+        },
+    ))
 }
 
 #[derive(Debug)]
@@ -126,21 +136,35 @@ pub fn parse_compobj(data: &[u8]) -> IResult<&[u8], CompObj> {
         let (data, crop_width) = be_u16(data)?;
         let (data, crop_height) = be_u16(data)?;
 
-        Ok((data, CompObj {
-            id, wid, cropped_flag, x, y,
-            crop_x: Some(crop_x),
-            crop_y: Some(crop_y),
-            crop_width: Some(crop_width),
-            crop_height: Some(crop_height),
-        }))
+        Ok((
+            data,
+            CompObj {
+                id,
+                wid,
+                cropped_flag,
+                x,
+                y,
+                crop_x: Some(crop_x),
+                crop_y: Some(crop_y),
+                crop_width: Some(crop_width),
+                crop_height: Some(crop_height),
+            },
+        ))
     } else {
-        Ok((data, CompObj {
-            id, wid, cropped_flag, x, y,
-            crop_x: None,
-            crop_y: None,
-            crop_width: None,
-            crop_height: None,
-        }))
+        Ok((
+            data,
+            CompObj {
+                id,
+                wid,
+                cropped_flag,
+                x,
+                y,
+                crop_x: None,
+                crop_y: None,
+                crop_width: None,
+                crop_height: None,
+            },
+        ))
     }
 }
 
@@ -163,10 +187,18 @@ pub fn parse_wdseg(data: &[u8], header: Header) -> IResult<&[u8], WDSegment> {
     let (data, width) = be_u16(data)?;
     let (data, height) = be_u16(data)?;
 
-    Ok((data, WDSegment {
-        header, n_windows, wid, x_pos, y_pos, width, height
-    }))
-
+    Ok((
+        data,
+        WDSegment {
+            header,
+            n_windows,
+            wid,
+            x_pos,
+            y_pos,
+            width,
+            height,
+        },
+    ))
 }
 
 #[derive(Debug)]
@@ -186,6 +218,35 @@ pub struct PalleteEntry {
     alpha: u8,
 }
 
+impl PalleteEntry {
+    pub fn to_rgba(&self) -> [u8; 4] {
+        let conv_matrix = Matrix::from_iter(
+            3,
+            3,
+            vec![1.0f64, 1., 1., 0., -0.1873, 1.8556, 1.5748, -0.4682, 0.],
+        );
+
+        let ycrcb = Matrix::from_iter(
+            3,
+            1,
+            vec![
+                self.y as f64 / 255.0,
+                self.cb as f64 / 255.0,
+                self.cr as f64 / 255.0,
+            ],
+        );
+
+        let rgb = conv_matrix * ycrcb;
+
+        [
+            (*rgb.get(0, 0).unwrap() * 255.0) as u8,
+            (*rgb.get(1, 0).unwrap() * 255.0) as u8,
+            (*rgb.get(2, 0).unwrap() * 255.0) as u8,
+            self.alpha,
+        ]
+    }
+}
+
 pub fn parse_pallete(data: &[u8]) -> IResult<&[u8], PalleteEntry> {
     let (data, eid) = be_u8(data)?;
     let (data, y) = be_u8(data)?;
@@ -193,9 +254,16 @@ pub fn parse_pallete(data: &[u8]) -> IResult<&[u8], PalleteEntry> {
     let (data, cb) = be_u8(data)?;
     let (data, alpha) = be_u8(data)?;
 
-    Ok((data, PalleteEntry {
-        eid, y, cr, cb, alpha
-    }))
+    Ok((
+        data,
+        PalleteEntry {
+            eid,
+            y,
+            cr,
+            cb,
+            alpha,
+        },
+    ))
 }
 
 pub fn parse_pds(data: &[u8], header: Header) -> IResult<&[u8], PDSegment> {
@@ -209,9 +277,15 @@ pub fn parse_pds(data: &[u8], header: Header) -> IResult<&[u8], PDSegment> {
     let palletes = palletes_iter.collect::<Vec<_>>();
     let _ = palletes_iter.finish();
 
-    Ok((data, PDSegment {
-        header, pid, version, palletes
-    }))
+    Ok((
+        data,
+        PDSegment {
+            header,
+            pid,
+            version,
+            palletes,
+        },
+    ))
 }
 
 pub struct ODSegment {
@@ -223,7 +297,6 @@ pub struct ODSegment {
     width: u16,
     height: u16,
     object_data: Vec<u8>,
-    
 }
 
 impl std::fmt::Debug for ODSegment {
@@ -249,9 +322,19 @@ pub fn parse_ods(data: &[u8], header: Header) -> IResult<&[u8], ODSegment> {
     let (data, height) = be_u16(data)?;
     let (data, object_data) = take(data_len - 4)(data)?;
 
-    Ok((data, ODSegment {
-        header, id, version, seq_flag, data_len, width, height, object_data: object_data.to_vec()
-    }))
+    Ok((
+        data,
+        ODSegment {
+            header,
+            id,
+            version,
+            seq_flag,
+            data_len,
+            width,
+            height,
+            object_data: object_data.to_vec(),
+        },
+    ))
 }
 
 #[derive(Debug)]
@@ -287,10 +370,176 @@ pub fn parse_segment(data: &[u8]) -> IResult<&[u8], Segment> {
             let (data, seg) = parse_ods(data, header)?;
             (data, Segment::ODS(seg))
         }
-        SegmentType::END => {
-            (data, Segment::END(ENDSegment { header }))
-        }
+        SegmentType::END => (data, Segment::END(ENDSegment { header })),
     };
 
     Ok((data, segment))
+}
+
+#[derive(Debug)]
+pub struct Frame {
+    pcs: PCSegment,
+    wds: WDSegment,
+    pds: Option<PDSegment>,
+    ods: Option<ODSegment>,
+    end: ENDSegment,
+}
+
+const BLACK: [u8; 4] = [0, 0, 0, 0];
+
+impl Frame {
+    pub fn pts(&self) -> u32 {
+        self.pcs.header.pts
+    }
+
+    pub fn get_pixels(&self) -> Option<RgbaImage> {
+        let object_data = self.ods.as_ref()?.object_data.as_slice();
+        let (_, decoded_pixels) = decode_rle(object_data).unwrap();
+
+        let ods = self.ods.as_ref()?;
+        let (w, h) = (ods.width, ods.height);
+        let mut image = RgbaImage::new(w as u32, h as u32);
+
+        for (i, color_id) in decoded_pixels.iter().enumerate() {
+            let x = (i % w as usize) as u16;
+            let y = (i / w as usize) as u16;
+
+            let color: Rgba<u8> = if *color_id == 0 {
+                BLACK.into()
+            } else {
+                let colors = &self.pds.as_ref()?.palletes;
+                let color = colors
+                    .iter()
+                    .find(|x| x.eid == *color_id)
+                    .map(|ycrcb| ycrcb.to_rgba())
+                    .unwrap_or(BLACK);
+
+                color.into()
+            };
+
+            image.put_pixel(x as u32, y as u32, color);
+        }
+
+        Some(image)
+    }
+
+    // FIXME: The code here might be incorrect if we have multiple objects/subpics.
+    pub fn image_x(&self) -> Option<u16> {
+        Some(self.pcs.objects.first()?.x)
+    }
+
+    pub fn image_y(&self) -> Option<u16> {
+        Some(self.pcs.objects.first()?.y)
+    }
+}
+
+fn is_color(byte: u8) -> bool {
+    byte >> 7 == 1
+}
+
+fn is_long(byte: u8) -> bool {
+    (byte >> 6) & 0b1 == 1
+}
+
+pub fn decode_rle(mut data: &[u8]) -> IResult<&[u8], Vec<u8>> {
+    let mut output = vec![];
+
+    while !data.is_empty() {
+        // check first byte color
+        let (leftover, color) = be_u8(data)?;
+        data = leftover;
+        match color {
+            0x00 => {}
+            _ => {
+                output.push(1);
+                continue;
+            }
+        };
+
+        // check second byte for length
+        let (leftover, length) = be_u8(data)?;
+        data = leftover;
+        let info = match length {
+            0x00 => {
+                continue;
+            }
+            x => x,
+        };
+
+        let is_color = is_color(info);
+        let big_len = is_long(info);
+
+        let len_u8 = info & 0b0011_1111;
+        assert_eq!(len_u8 >> 6, 0);
+
+        let len = if big_len {
+            let (leftover, len2_u8) = be_u8(data)?;
+            let buf = [len_u8, len2_u8];
+            data = leftover;
+            u16::from_be_bytes(buf)
+        } else {
+            len_u8 as u16
+        };
+
+        let (leftover, color) = if is_color {
+            be_u8(data)?
+        } else {
+            // use preferred color
+            (data, 0)
+        };
+
+        for _x in 0..len {
+            output.push(color);
+        }
+
+        data = leftover;
+    }
+
+    Ok((data, output))
+}
+
+pub fn try_take_frame(segments: &mut Vec<Segment>) -> Option<Frame> {
+    // if theres no `END` segment it means we can only create a partial frame.
+    if segments
+        .iter()
+        .find(|x| matches!(x, Segment::END(_)))
+        .is_none()
+    {
+        return None;
+    }
+
+    let pcs = match take_if!(segments, |x| matches!(x, Segment::PCS(_))) {
+        Some(Segment::PCS(x)) => x,
+        _ => unreachable!(),
+    };
+
+    let wds = match take_if!(segments, |x| matches!(x, Segment::WDS(_))) {
+        Some(Segment::WDS(x)) => x,
+        _ => unreachable!(),
+    };
+
+    let pds = match take_if!(segments, |x| matches!(x, Segment::PDS(_))) {
+        Some(Segment::PDS(x)) => Some(x),
+        None => None,
+        _ => unreachable!(),
+    };
+
+    let ods = match take_if!(segments, |x| matches!(x, Segment::ODS(_))) {
+        Some(Segment::ODS(x)) => Some(x),
+        None => None,
+        _ => unreachable!(),
+    };
+
+    let end = match take_if!(segments, |x| matches!(x, Segment::END(_))) {
+        Some(Segment::END(x)) => x,
+        _ => unreachable!(),
+    };
+
+    Some(Frame {
+        pcs,
+        wds,
+        pds,
+        ods,
+        end,
+    })
 }
