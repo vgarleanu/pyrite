@@ -1,17 +1,17 @@
-use std::fs::File;
 use std::env::args;
+use std::fs::File;
 use std::io::Read;
 
 use pyrite::parse_segment;
+use pyrite::try_take_frame;
 
-fn main () -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = args();
     args.next();
 
     let mut data_vec = vec![];
     let mut file = File::open(args.next().unwrap())?;
     file.read_to_end(&mut data_vec)?;
-
 
     let mut data_bytes = data_vec.as_ref();
     let mut segments = vec![];
@@ -27,9 +27,17 @@ fn main () -> Result<(), Box<dyn std::error::Error>> {
         data_bytes = leftover;
     }
 
-    for seg in segments {
-        println!("{:?}", seg);
+    println!("{:?}", segments.first());
+
+    while let Some(frame) = try_take_frame(&mut segments) {
+        frame
+            .get_pixels()
+            .unwrap()
+            .save_with_format(args.next().unwrap(), image::ImageFormat::Png);
+        break;
     }
+
+    println!("{:?}", segments.len());
 
     Ok(())
 }
